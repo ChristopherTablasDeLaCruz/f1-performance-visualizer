@@ -1,3 +1,10 @@
+"""
+Telemetry comparison charts for F1 analysis.
+
+Shows detailed car data like speed, throttle, and brakes for specific laps.
+Good for comparing how different drivers tackled the same track.
+"""
+
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -5,24 +12,20 @@ import plotly.graph_objects as go
 @st.cache_data(show_spinner="Fetching telemetry data...")
 def get_telemetry_for_driver_lap(_session, driver_code, lap_number):
     """
-    Retrieve telemetry data for a specific driver and lap number.
-
-    Parameters:
-        _session: FastF1 session object.
-        driver_code (str): Abbreviation of the driver's name (e.g. 'VER').
-        lap_number (int): The lap to fetch telemetry for.
-
-    Returns:
-        pd.DataFrame or None: DataFrame containing telemetry data with distance, speed, throttle, etc.
+    Get detailed car data for one driver's lap.
+    
+    Pulls telemetry like speed, throttle, brakes for a specific lap.
+    Returns None if that lap doesn't exist.
     """
 
-    #get the specific lap for a specific driver 
+    # Find the specific lap for this driver 
     lap = _session.laps.pick_driver(driver_code).loc[_session.laps["LapNumber"] == lap_number]
     if lap.empty:
         return None
     
     lap = lap.iloc[0]
 
+    # Get all the detailed telemetry data
     tel = lap.get_telemetry().add_distance()
     tel["LapTime"] = lap.LapTime
     tel["Driver"] = driver_code
@@ -32,20 +35,16 @@ def get_telemetry_for_driver_lap(_session, driver_code, lap_number):
 
 def plot_telemetry_charts_multiselect(session, selected):
     """
-    Plot multiple telemetry variables for selected driver and lap pairs.
-
-    Parameters:
-        session: FastF1 session object with telemetry.
-        selected: List of (driver_code, lap_number) tuples to compare.
-
-    Renders:
-        One Plotly chart per telemetry variable (e.g., Speed, Throttle).
+    Compare telemetry between different driver-lap combinations.
+    
+    Shows speed, throttle, brakes etc. side by side so you can see
+    how different drivers handled the same track sections.
     """
     if not selected:
         st.info("Please select at least one driver-lap combination to display telemetry.")
         return
 
-    # Telemetry metrics we will be plotting
+    # Different telemetry channels we can show
     telemetry_vars = {
         "Speed (km/h)": "Speed",
         "Throttle (%)": "Throttle",
@@ -58,12 +57,13 @@ def plot_telemetry_charts_multiselect(session, selected):
     for label, col in telemetry_vars.items():
         fig = go.Figure()
 
-        #loop through the different driver / lap combinations
+        # Add each driver/lap combination to the chart
         for driver_code, lap_number in selected:
             tel = get_telemetry_for_driver_lap(session, driver_code, lap_number)
             if tel is None:
                 continue
 
+            # Get the data for this telemetry channel
             y_values = tel[col] if isinstance(col, str) else col(tel)
             fig.add_trace(go.Scatter(
                 x=tel["Distance"],
@@ -72,6 +72,7 @@ def plot_telemetry_charts_multiselect(session, selected):
                 name=f"{driver_code} - Lap {lap_number}"
             ))
 
+        # Style the chart
         fig.update_layout(
             title=f"{label} Comparison",
             xaxis_title="Distance (m)",
