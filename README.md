@@ -2,6 +2,15 @@
 
 Interactive dashboard for analyzing Formula 1 race data. Built with Streamlit and FastF1.
 
+## Demo
+
+![Preview of the F1 Race Dashboard](assets/f1-race-dashboard-demo-vid-2x.gif)
+
+*Above: quick GIF preview. same content as youtube video, just lower quality.*
+
+[Watch the full demo on YouTube (2× speed, ~50s)](https://youtu.be/Vw6mTDXLyD0)  
+[Try the live app here](https://f1-race-dashboard.streamlit.app/)
+
 ## What it does
 
 Lets you explore F1 race data through a web interface. Pick any race from 2018-present and see:
@@ -20,10 +29,6 @@ I wanted to understand F1 strategy better than what you get from just watching r
 Also solved some real technical challenges:
 - F1 data takes 20-30 seconds to download, so I built a caching system that gets it down to 2 seconds after the first load
 - Pit stop detection was broken (safety car laps were being marked as pit stops), so I rewrote it to use actual stint data
-
-## Screenshots
-
-coming soon
 
 ## Setup
 
