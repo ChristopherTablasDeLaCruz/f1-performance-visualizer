@@ -99,9 +99,23 @@ def main():
         
         # Initialize session state for year selection
         if 'selected_year' not in st.session_state:
-            st.session_state.selected_year = season_years[0]
+            latest_schedule = get_schedule(current_year)
+            if latest_schedule.empty:
+                st.session_state.selected_year = 2025
+            else:
+                st.session_state.selected_year = current_year
             
-        selected_year = st.selectbox("Select Season", season_years, key='year_select')
+        try:
+            default_year_index = season_years.index(st.session_state.selected_year)
+        except ValueError:
+            default_year_index = 0
+
+        selected_year = st.selectbox(
+            "Select Season", 
+            season_years, 
+            index=default_year_index, 
+            key='year_select'
+        )
         
         # Invalidate telemetry if season changes
         if selected_year != st.session_state.selected_year:
@@ -131,12 +145,7 @@ def main():
             return
             
         st.divider()
-        if st.button("Clear Cache"):
-            st.cache_data.clear()
-            st.cache_resource.clear()
-            if os.path.exists(CACHE_DIR):
-                shutil.rmtree(CACHE_DIR)
-            st.rerun()
+        st.caption("Data provided by FastF1")
 
     # --- Main Dashboard ---
     st.title("🏎️ F1 Race Analysis Dashboard")
@@ -211,7 +220,7 @@ def main():
         
         # Phase 4: On-Demand Load (Telemetry)
         if st.session_state.get('telemetry_loaded', False):
-            with st.spinner("Loading high-resolution telemetry..."):
+            with st.spinner("Loading telemetry..."):
                 ensure_telemetry_loaded(race_session)
             
             c1, c2 = st.columns(2)
@@ -234,7 +243,7 @@ def main():
                 plot_telemetry_charts_multiselect(race_session, combos)
                 
         else:
-            st.info("⚠️ High-resolution telemetry is bandwidth-intensive (~20MB).")
+            
             if st.button("Load Telemetry Data", type="primary"):
                 st.session_state.telemetry_loaded = True
                 st.rerun()
