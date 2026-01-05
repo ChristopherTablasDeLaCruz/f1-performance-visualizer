@@ -1,366 +1,242 @@
 """
-F1 Race Analysis Dashboard
+F1 Race Analysis Dashboard.
 
-Interactive Streamlit app for analyzing Formula 1 race data.
-Shows race results, driver performance, strategy, and telemetry.
 """
 
 import datetime
-import streamlit as st
-from fastf1 import get_event_schedule
-import pandas as pd
 import os
 import shutil
-from src.core.cache_manager import F1DataCache
-from src.core.session_adapters import CachedF1Session
+import pandas as pd
+import streamlit as st
+import fastf1
+from fastf1 import get_event_schedule
+
 from src.core.performance_analyzer import analyze_performance
 from src.visualizers.performance_charts import plot_performance_comparison
 from src.visualizers.strategy_charts import plot_tire_strategy_timeline
-from src.utils.race_summary import get_race_summary
 from src.visualizers.lap_time_charts import plot_driver_pace_progression
 from src.visualizers.position_charts import plot_position_changes
 from src.visualizers.telemetry_charts import plot_telemetry_charts_multiselect
 
-@st.cache_data(show_spinner=False)
-def get_cached_schedule(year):
-    """Get all completed races for a season."""
-    schedule = get_event_schedule(year, include_testing=False)
-    schedule["Session5Date"] = pd.to_datetime(schedule["Session5Date"], utc=True)
-    now = pd.Timestamp.now(tz="UTC")
-    completed_races = schedule[schedule["Session5Date"] < now]
-    return completed_races
+# -----------------------------------------------------------------------------
+# Caching & Setup
+# -----------------------------------------------------------------------------
 
-@st.cache_data(show_spinner="Analyzing performance...")
-def get_cached_performance_analysis(quali_data, race_data):
-    """Compare qualifying vs race performance using cached data."""
-    return analyze_performance(quali_data, race_data)
+CACHE_DIR = ".f1_cache"
+
+def setup_cache():
+    """Configures FastF1's native file-based caching."""
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+    fastf1.Cache.enable_cache(CACHE_DIR)
+
+@st.cache_data(show_spinner=False)
+def get_schedule(year):
+    """
+    Retrieves the race schedule for a given year.
+    Filters for completed races only (where the event date is in the past).
+    """
+    schedule = get_event_schedule(year, include_testing=False)
+    if 'EventDate' in schedule.columns:
+        schedule["EventDate"] = pd.to_datetime(schedule["EventDate"], utc=True)
+        now = pd.Timestamp.now(tz="UTC")
+        return schedule[schedule["EventDate"] < now]
+    return pd.DataFrame()
+
+@st.cache_resource(show_spinner=False)
+def load_race_base(year, race_name):
+    """
+    Lightweight Loader: Retrieves only the Race Results (Winner, Podium).
+    FastF1 params are set to False to minimize download/parsing time.
+    """
+    session = fastf1.get_session(year, race_name, 'R')
+    session.load(laps=False, telemetry=False, weather=True, messages=False)
+    return session
+
+def ensure_laps_loaded(session):
+    """
+    Lazy Loader: Ensures lap timing data is present in the session.
+    Checks for the '.laps' property safely to avoid DataNotLoadedError.
+    """
+    try:
+        _ = session.laps
+    except Exception:
+        session.load(laps=True, telemetry=False, weather=True, messages=False)
+    return session
+
+def ensure_telemetry_loaded(session):
+    """
+    On-Demand Loader: Ensures high-frequency telemetry (speed, throttle) is loaded.
+    This is the heaviest operation, so it's guarded.
+    """
+    try:
+        if session.car_data is None or session.car_data.empty:
+            raise ValueError("Telemetry missing")
+    except Exception:
+        session.load(telemetry=True, weather=True)
+    return session
+
+@st.cache_resource(show_spinner="Loading Qualifying Data...")
+def load_quali_session(year, race_name):
+    """Retrieves Qualifying session data for performance comparison."""
+    session = fastf1.get_session(year, race_name, 'Q')
+    session.load(laps=True, telemetry=False, weather=False, messages=False)
+    return session
+
+# -----------------------------------------------------------------------------
+# Main App Structure
+# -----------------------------------------------------------------------------
 
 def main():
-    """
-    F1 Race Analysis Dashboard
+    st.set_page_config(page_title="F1 Race Dashboard", layout="wide", page_icon="🏎️")
+    setup_cache()
     
-    Main Streamlit app that lets users explore F1 race data with:
-    - Race summaries and results
-    - Driver performance comparisons  
-    - Strategy and tire analysis
-    - Lap time progressions
-    - Telemetry comparisons
-    
-    Uses smart caching so data loads fast after the first time.
-    """
-    st.set_page_config(
-        page_title="F1 Race Dashboard", 
-        layout="wide",
-        page_icon="🏎️"
-    )
-    
-    # Set up the caching system
-    cache_manager = F1DataCache()
-    
-    # Sidebar for race selection and settings
+    # --- Sidebar Configuration ---
     with st.sidebar:
         st.header("🏁 Race Selection")
-        
-        # Pick the season
         current_year = datetime.datetime.now().year
         season_years = list(range(2018, current_year + 1))[::-1]
-        default_year_index = season_years.index(2024)
-        selected_year = st.selectbox("Select Season", season_years, index=default_year_index)
-
-        # Pick the race
-        try:
-            schedule = get_cached_schedule(selected_year)
-            schedule['Session5Date'] = pd.to_datetime(schedule['Session5Date'], errors='coerce')
-            if selected_year == current_year:
-                today = pd.Timestamp.now(tz='UTC')
-                schedule = schedule[schedule['Session5Date'] < today]
-            schedule = schedule.sort_values(by="Session5Date")
-            race_names = schedule['EventName'].tolist()
-            selected_race = st.selectbox("Select Grand Prix", race_names)
-
-        except Exception as e:
-            st.error(f"Could not load races for {selected_year}: {e}")
-            return
         
-        # Cache management
-        st.divider()
-        st.subheader("⚙️ Cache Settings")
-        
-        # Show cache info
-        cache_dir = ".f1_cache"
-        if os.path.exists(cache_dir):
-            cache_files = [f for f in os.listdir(cache_dir) if f.endswith('.parquet')]
-            cache_count = len(cache_files)
+        # Initialize session state for year selection
+        if 'selected_year' not in st.session_state:
+            st.session_state.selected_year = season_years[0]
             
-            if cache_files:
-                cache_size = sum(
-                    os.path.getsize(os.path.join(cache_dir, f))
-                    for f in cache_files
-                ) / (1024 * 1024)  # Convert to MB
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("Cached Races", cache_count)
-                with col2:
-                    st.metric("Cache Size", f"{cache_size:.1f} MB")
-            else:
-                st.info("Cache is empty")
-        else:
-            st.info("No cache directory")
+        selected_year = st.selectbox("Select Season", season_years, key='year_select')
         
-        # Clear cache button
-        if st.button("Clear All Cache", type="secondary", use_container_width=True):
-            if os.path.exists(cache_dir):
-                shutil.rmtree(cache_dir, ignore_errors=True)
-            st.cache_data.clear()
-            st.success("✅ Cache cleared!")
-            st.rerun()
-        
-        # Performance tips
-        st.divider()
-        st.caption("💡 First load: ~20-30s")
-        st.caption("⚡ Cached loads: <2s")
+        # Invalidate telemetry if season changes
+        if selected_year != st.session_state.selected_year:
+            st.session_state.telemetry_loaded = False
+            st.session_state.selected_year = selected_year
 
-    # Main dashboard area
+        try:
+            schedule = get_schedule(selected_year)
+            if schedule.empty:
+                st.info("No completed races found.")
+                return
+            
+            schedule = schedule.sort_values(by="EventDate")
+            race_names = schedule['EventName'].tolist()
+            
+            # Default to the most recent race
+            default_ix = len(race_names) - 1
+            selected_race = st.selectbox("Select Grand Prix", race_names, index=default_ix, key='race_select')
+            
+            # Invalidate telemetry if race changes
+            if 'last_race' not in st.session_state or st.session_state.last_race != selected_race:
+                st.session_state.telemetry_loaded = False
+                st.session_state.last_race = selected_race
+            
+        except Exception as e:
+            st.error(f"Error loading schedule: {e}")
+            return
+            
+        st.divider()
+        if st.button("Clear Cache"):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            if os.path.exists(CACHE_DIR):
+                shutil.rmtree(CACHE_DIR)
+            st.rerun()
+
+    # --- Main Dashboard ---
     st.title("🏎️ F1 Race Analysis Dashboard")
     st.header(f"{selected_race} {selected_year}")
     
-    # Load the race data
+    # Phase 1: Instant Load (Results)
     try:
-        # Check if we already have this data cached
-        race_cache_path = cache_manager.get_cache_path(selected_year, selected_race, 'race')
-        quali_cache_path = cache_manager.get_cache_path(selected_year, selected_race, 'quali')
+        race_session = load_race_base(selected_year, selected_race)
         
-        is_cached = cache_manager.is_cache_valid(race_cache_path) and cache_manager.is_cache_valid(quali_cache_path)
+        st.subheader("📋 Race Summary")
+        col1, col2, col3 = st.columns(3)
+        results = race_session.results
         
-        if is_cached:
-            load_message = "Loading from cache..."
-        else:
-            load_message = "First time loading this race (this will take 20-30 seconds)..."
-        
-        with st.spinner(load_message):
-            race_data = cache_manager.load_race_data(selected_year, selected_race)
-            quali_data = cache_manager.load_quali_data(selected_year, selected_race)
-        
-        if not is_cached:
-            st.success("✅ Data loaded and cached! Future loads will be instant.")
-        
-    except Exception as e:
-        st.error(f"Failed to load race data: {e}")
-        st.info("Try selecting a different race or clearing the cache.")
-        return
-    
-    # Show race summary
-    st.subheader("📋 Race Summary")
-
-    # Build summary from cached data
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        results_df = pd.DataFrame(race_data['results'])
-        
-        # Handle different column names for position
-        position_col = 'Position'
-        if 'Position' not in results_df.columns:
-            position_col = 'ClassifiedPosition' if 'ClassifiedPosition' in results_df.columns else 'GridPosition'
-        
-        # Show the winner
-        try:
-            winner = results_df[results_df[position_col] == 1.0].iloc[0]
-            st.markdown(f"**🏆 Winner**")
-            st.markdown(f"{winner['Abbreviation']} ({winner['TeamName']})")
-        except:
-            st.markdown(f"**🏆 Winner**")
-            st.markdown("Data not available")
-
-    with col2:
-        try:
-            podium = results_df[results_df[position_col] <= 3].sort_values(position_col)
-            podium_names = ', '.join(podium['Abbreviation'].tolist())
-            st.markdown(f"**🥇🥈🥉 Podium**")
-            st.markdown(podium_names)
-        except:
-            st.markdown(f"**🥇🥈🥉 Podium**")
-            st.markdown("Data not available")
-
-    with col3:
-        st.markdown(f"**📊 Total Laps**")
-        st.markdown(f"{race_data['event_info'].get('total_laps', 'N/A')}")
-        
-        # Show fastest lap
-        laps_df = pd.DataFrame(race_data['laps'])
-        if not laps_df.empty and 'LapTime' in laps_df.columns:
-            laps_df['LapTime'] = pd.to_timedelta(laps_df['LapTime'])
-            fastest_lap_idx = laps_df['LapTime'].idxmin()
-            if pd.notna(fastest_lap_idx):
-                fastest_lap = laps_df.loc[fastest_lap_idx]
-                lap_time = fastest_lap['LapTime']
-                formatted_time = f"{int(lap_time.total_seconds() // 60)}:{lap_time.total_seconds() % 60:.3f}"
-                st.markdown(f"**🚀 Fastest Lap**: {fastest_lap['Driver']} ({formatted_time}) on Lap {int(fastest_lap['LapNumber'])}")
-        
-    # Weather info if available
-    weather_data = race_data.get('weather')
-    if weather_data is not None and len(weather_data) > 0:
-        weather_df = pd.DataFrame(weather_data)
-        if not weather_df.empty and 'AirTemp' in weather_df.columns and 'TrackTemp' in weather_df.columns:
+        if not results.empty:
+            pos_col = 'Position' if 'Position' in results.columns else 'ClassifiedPosition'
             try:
-                avg_air_temp = int(weather_df["AirTemp"].mean())
-                avg_track_temp = int(weather_df["TrackTemp"].mean())
-                st.markdown(f"**🌡️ Conditions**: Air {avg_air_temp}°C | Track {avg_track_temp}°C")
-            except Exception:
+                winner = results[results[pos_col] == 1.0].iloc[0]
+                st.markdown(f"**🏆 Winner**: {winner['Abbreviation']}")
+            except Exception: 
                 pass
-    
+            
+            try:
+                podium = results[results[pos_col] <= 3].sort_values(pos_col)['Abbreviation'].tolist()
+                st.markdown(f"**🥇🥈🥉 Podium**: {', '.join(podium)}")
+            except Exception: 
+                pass
+
+        if hasattr(race_session, 'weather_data'):
+            w = race_session.weather_data
+            if w is not None and not w.empty:
+                 st.markdown(f"**🌡️ Temp**: {w['AirTemp'].mean():.1f}°C")
+            
+    except Exception as e:
+        st.error(f"Failed to load race results: {e}")
+        return
+
     st.divider()
+
+    # Phase 2: Background Load (Laps)
+    with st.spinner("Processing lap data..."):
+        race_session = ensure_laps_loaded(race_session)
     
-    # Analysis tabs
+    # Phase 3: Visualization Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Position Changes", 
-        "⚡ Performance Analysis", 
-        "🛞 Strategy", 
-        "⏱️ Lap Times",
-        "📈 Telemetry"
+        "📊 Position", "⚡ Performance", "🛞 Strategy", "⏱️ Pace", "📈 Telemetry"
     ])
     
+    drivers = list(race_session.results['Abbreviation'])
+    
     with tab1:
-        st.subheader("Position Changes During Race")
-        # Create session object from cached data
-        cached_session = CachedF1Session(
-            race_data,
-            race_data['event_info']['name'],
-            selected_year,
-            race_data['event_info'].get('date')
-        )
-        plot_position_changes(cached_session)
+        plot_position_changes(race_session)
     
     with tab2:
-        st.subheader("Driver Performance Analysis")
-        # Compare qualifying vs race performance
-        results_df = get_cached_performance_analysis(quali_data, race_data)
-        plot_performance_comparison(results_df)
+        try:
+            quali = load_quali_session(selected_year, selected_race)
+            perf_df = analyze_performance(quali, race_session)
+            plot_performance_comparison(perf_df)
+        except Exception:
+            st.info("Qualifying data unavailable for comparison.")
     
     with tab3:
-        st.subheader("Tyre Strategy Timeline")
-        
-        # Create session object from cached data
-        cached_session = CachedF1Session(
-            race_data,
-            race_data['event_info']['name'],
-            selected_year,
-            race_data['event_info'].get('date')
-        )
-    
-        # Let user pick which drivers to show
-        drivers = cached_session.results['Abbreviation'].tolist()
-        selected_strategy_drivers = st.multiselect(
-            "Select drivers to display", 
-            drivers, 
-            default=drivers[:10]  # Show top 10 by default
-        )
-        
-        if selected_strategy_drivers:
-            plot_tire_strategy_timeline(cached_session, selected_strategy_drivers)
-    
+        sel = st.multiselect("Drivers", drivers, default=drivers[:5], key="strat")
+        if sel: 
+            plot_tire_strategy_timeline(race_session, sel)
+            
     with tab4:
-        st.subheader("Driver Lap Times")
-        results_df = pd.DataFrame(race_data['results'])
-        selected_driver = st.selectbox("Select Driver", results_df['Abbreviation'].tolist())
-        
-        # Create session object from cached data
-        cached_session = CachedF1Session(
-            race_data,
-            race_data['event_info']['name'],
-            selected_year,
-            race_data['event_info'].get('date')
-        )
-        plot_driver_pace_progression(cached_session, selected_driver)
-    
+        drv = st.selectbox("Driver", drivers, key="pace")
+        plot_driver_pace_progression(race_session, drv)
+
     with tab5:
         st.subheader("Telemetry Comparison")
         
-        # Telemetry needs full session data, not cached
-        if 'telemetry_loaded' not in st.session_state:
-            st.session_state.telemetry_loaded = False
-            st.session_state.telemetry_session = None
-        
-        if not st.session_state.telemetry_loaded:
-            st.info("⚠️ Telemetry data requires full session loading with all data.")
-            st.caption("This will take 30-60 seconds as it needs to download detailed telemetry data.")
+        # Phase 4: On-Demand Load (Telemetry)
+        if st.session_state.get('telemetry_loaded', False):
+            with st.spinner("Loading high-resolution telemetry..."):
+                ensure_telemetry_loaded(race_session)
             
-            if st.button("Load Full Telemetry Data", type="primary"):
-                with st.spinner("Loading full telemetry data... This may take 30-60 seconds"):
-                    try:
-                        # Load complete session with telemetry
-                        import fastf1
-                        session = fastf1.get_session(selected_year, selected_race, 'R')
-                        session.load(laps=True, messages=True)
-                        
-                        # Save in session state
-                        st.session_state.telemetry_session = session
-                        st.session_state.telemetry_loaded = True
-                        
-                        st.success("✅ Telemetry data loaded successfully!")
-                        st.rerun()
-                        
-                    except Exception as e:
-                        st.error(f"Failed to load telemetry data: {e}")
-                        st.info("This could be due to network issues or the race not having telemetry data available.")
-        
-        else:
-            st.success("✅ Telemetry data is loaded and ready!")
-            
-            # Get available drivers
-            results_df = pd.DataFrame(race_data['results'])
-            available_drivers = results_df['Abbreviation'].tolist()
-            
-            # Driver and lap selection
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                selected_drivers = st.multiselect(
-                    "Select drivers to compare",
-                    available_drivers,
-                    default=available_drivers[:2] if len(available_drivers) >= 2 else available_drivers[:1],
-                    max_selections=4
-                )
-            
-            with col2:
-                if selected_drivers:
-                    # Get lap range for the first selected driver
-                    driver_laps = st.session_state.telemetry_session.laps.pick_drivers(selected_drivers[0])
-                    if not driver_laps.empty:
-                        min_lap = int(driver_laps['LapNumber'].min())
-                        max_lap = int(driver_laps['LapNumber'].max())
-                        
-                        selected_lap = st.number_input(
-                            "Select lap number",
-                            min_value=min_lap,
-                            max_value=max_lap,
-                            value=min_lap,
-                            step=1
-                        )
+            c1, c2 = st.columns(2)
+            with c1:
+                cmp_drivers = st.multiselect("Compare", drivers, default=drivers[:2], max_selections=3)
+            with c2:
+                if cmp_drivers:
+                    d_laps = race_session.laps.pick_driver(cmp_drivers[0])
+                    if not d_laps.empty:
+                        min_l, max_l = int(d_laps.LapNumber.min()), int(d_laps.LapNumber.max())
+                        def_l = int((min_l + max_l)/2)
+                        sel_lap = st.number_input("Lap", min_l, max_l, def_l)
                     else:
-                        selected_lap = 1
-                        st.warning("No lap data found for selected driver")
+                        sel_lap = 1
                 else:
-                    selected_lap = 1
+                    sel_lap = 1
             
-            # Show telemetry charts
-            if selected_drivers:
-                try:
-                    # Create driver-lap combinations
-                    driver_lap_combinations = [(driver, selected_lap) for driver in selected_drivers]
-                    
-                    # Plot the telemetry
-                    plot_telemetry_charts_multiselect(st.session_state.telemetry_session, driver_lap_combinations)
-                    
-                except Exception as e:
-                    st.error(f"Error plotting telemetry: {e}")
-                    st.info("Try selecting different drivers or lap numbers.")
-            
-            # Option to clear telemetry data
-            if st.button("Clear Telemetry Data", type="secondary"):
-                st.session_state.telemetry_loaded = False
-                st.session_state.telemetry_session = None
+            if cmp_drivers:
+                combos = [(d, sel_lap) for d in cmp_drivers]
+                plot_telemetry_charts_multiselect(race_session, combos)
+                
+        else:
+            st.info("⚠️ High-resolution telemetry is bandwidth-intensive (~20MB).")
+            if st.button("Load Telemetry Data", type="primary"):
+                st.session_state.telemetry_loaded = True
                 st.rerun()
 
 if __name__ == "__main__":

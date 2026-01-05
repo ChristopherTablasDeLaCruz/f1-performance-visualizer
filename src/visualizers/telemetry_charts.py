@@ -1,86 +1,75 @@
 """
-Telemetry comparison charts for F1 analysis.
-
-Shows detailed car data like speed, throttle, and brakes for specific laps.
-Good for comparing how different drivers tackled the same track.
+Visualizes telemetry data comparisons between drivers.
 """
 
 import streamlit as st
 import plotly.graph_objects as go
 
-
-@st.cache_data(show_spinner="Fetching telemetry data...")
-def get_telemetry_for_driver_lap(_session, driver_code, lap_number):
+def get_telemetry_for_driver_lap(session, driver_code, lap_number):
     """
-    Get detailed car data for one driver's lap.
-    
-    Pulls telemetry like speed, throttle, brakes for a specific lap.
-    Returns None if that lap doesn't exist.
+    Retrieves telemetry data (speed, throttle, etc.) for a specific driver and lap.
+    Returns None if the lap is invalid or data is missing.
     """
-
-    # Find the specific lap for this driver 
-    lap = _session.laps.pick_driver(driver_code).loc[_session.laps["LapNumber"] == lap_number]
-    if lap.empty:
+    try:
+        driver_laps = session.laps.pick_driver(driver_code)
+        if driver_laps.empty: 
+            return None
+        
+        lap_data = driver_laps[driver_laps['LapNumber'] == lap_number]
+        if lap_data.empty: 
+            return None
+        
+        lap = lap_data.iloc[0]
+        
+        # .add_distance() is required for the x-axis on telemetry charts
+        return lap.get_telemetry().add_distance()
+        
+    except Exception:
         return None
-    
-    lap = lap.iloc[0]
-
-    # Get all the detailed telemetry data
-    tel = lap.get_telemetry().add_distance()
-    tel["LapTime"] = lap.LapTime
-    tel["Driver"] = driver_code
-    tel["Lap"] = lap_number
-    
-    return tel
 
 def plot_telemetry_charts_multiselect(session, selected):
     """
-    Compare telemetry between different driver-lap combinations.
+    Renders stacked Plotly charts for Speed, Throttle, Brake, RPM, and Gear.
     
-    Shows speed, throttle, brakes etc. side by side so you can see
-    how different drivers handled the same track sections.
+    Args:
+        session: The FastF1 session object.
+        selected: List of tuples [(driver_code, lap_number), ...]
     """
-    if not selected:
-        st.info("Please select at least one driver-lap combination to display telemetry.")
+    if not selected: 
         return
 
-    # Different telemetry channels we can show
-    telemetry_vars = {
-        "Speed (km/h)": "Speed",
-        "Throttle (%)": "Throttle",
-        "Brake (%)": "Brake",
-        "RPM (x1000)": lambda tel: tel["RPM"] / 1000,
-        "Gear": "nGear",
-        "DRS": "DRS"
+    channels = {
+        "Speed": ("Speed", "km/h"),
+        "Throttle": ("Throttle", "%"),
+        "Brake": ("Brake", "%"),
+        "RPM": ("RPM", "rpm"),
+        "Gear": ("nGear", "#")
     }
 
-    for label, col in telemetry_vars.items():
+    for name, (col, unit) in channels.items():
         fig = go.Figure()
+        has_data = False
 
-        # Add each driver/lap combination to the chart
-        for driver_code, lap_number in selected:
-            tel = get_telemetry_for_driver_lap(session, driver_code, lap_number)
-            if tel is None:
-                continue
-
-            # Get the data for this telemetry channel
-            y_values = tel[col] if isinstance(col, str) else col(tel)
-            fig.add_trace(go.Scatter(
-                x=tel["Distance"],
-                y=y_values,
-                mode="lines",
-                name=f"{driver_code} - Lap {lap_number}"
-            ))
-
-        # Style the chart
-        fig.update_layout(
-            title=f"{label} Comparison",
-            xaxis_title="Distance (m)",
-            yaxis_title=label,
-            height=300,
-            margin=dict(t=50, b=40, l=50, r=20),
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
+        for driver, lap_num in selected:
+            tel = get_telemetry_for_driver_lap(session, driver, lap_num)
+            
+            if tel is not None and not tel.empty:
+                has_data = True
+                fig.add_trace(go.Scatter(
+                    x=tel['Distance'], 
+                    y=tel[col], 
+                    name=f"{driver} L{lap_num}",
+                    mode='lines'
+                ))
+        
+        if has_data:
+            fig.update_layout(
+                title=f"{name}", 
+                yaxis_title=unit,
+                height=300,
+                margin=dict(l=50, r=20, t=40, b=20),
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning(f"No {name} data found for selected drivers.")
