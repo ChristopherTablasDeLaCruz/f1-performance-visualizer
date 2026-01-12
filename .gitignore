@@ -3,3 +3,4 @@ __pycache__/
 venv/
 .cache/
 .f1_cache/
+.DS_Store
